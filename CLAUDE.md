@@ -1,0 +1,53 @@
+@AGENTS.md
+
+# BacktestMind
+
+A TradersCasa / FX Replay style backtesting app: pick a pair, a start date and a balance, replay the market candle by candle, trade it with a simulated broker, then study the analytics. Built from the backtest page of `../tradingMind` (that project stays as it is; don't change it).
+
+## Run
+
+```
+npm install      # also runs scripts/patch-klinecharts.mjs
+npm run dev      # http://localhost:3100
+npm run typecheck
+```
+
+## Data
+
+`public/market` is a symlink to `data/market` (about 4 GB, gitignored; forex from 2015, gold from 2009, BTC from Aug 2017, oil from Oct 2021, US30 / NAS100 from 2012), built by `scripts/prices.py` (a copy of `tradingMind/tools/prices.py`, so tradingMind stays untouched; downloads live in `_work/prices/raw`, also gitignored). `python3 scripts/prices.py` fetches what's missing plus the latest days, then rebuilds; `fetch` / `build` do one half; symbols after the command (`fetch US30 NAS100`) limit it to those, and `build` then keeps the other symbols' current build (hard links). A file that fails to download (site down or throttling) is skipped and tried again on the next run; files already downloaded are never fetched again. histdata misses hours on some days (most of Feb–Jul 2023, a few single days); `gap_months` counts candles per trading day (cached in `raw/<SYM>/gaps.json`), and months with a short weekday (forex < 1300, gold < 1100, holidays skipped) are downloaded from Dukascopy (`duka-<YYYY-MM>.json`) to fill only the missing minutes. Both sources agree on time and price. Sources: histdata (forex, gold), Dukascopy's chart feed (`freeserv.dukascopy.com`, the latest days, every month of US oil `USOIL` = `LIGHT.CMD/USD`, since histdata's WTI has gaps from 2024, and of the indices `US30` = `USA30.IDX/USD`, `NAS100` = `USATECH.IDX/USD`; their 2012 – mid-2013 feed has only the US cash session, about 390 candles a day). Dukascopy candles count when they have volume or moved (index minutes can move with 0 volume); index candles from Friday 17:00 to Sunday 17:00 New York are dropped., Binance (BTC). Dukascopy's `datafeed` .bi5 files still return 503; the chart feed works (Oct 2026). `index.json` lists symbols and month chunks; each `.bin` is int32 `[time, o, h, l, c]` + float32 volume per candle, prices ÷ `scale`. Selling the app needs licensed data first.
+
+## Layout
+
+- `src/lib/market.ts` – index/chunk loading, `bucketEnd` (forex day = 17:00 New York), `Feed` (candles up to the replay cursor; a half-built higher-TF candle is rebuilt from M1).
+- `src/lib/broker.ts` – simulated fills. Chart = bid, ask = bid + spread. Every pending/open order is checked against each M1 candle; stop wins if SL and TP fall in the same minute; gaps fill at the open.
+  Exness rules (session `account`, Standard defaults for old sessions): account type sets margin call / stop out (Standard 60/0, Pro/Raw/Zero 30/0); leverage 1:2–1:2000 (BTC capped 1:400); margin = lots × contract × price ÷ leverage, checked for market orders and when a pending order triggers (else cancelled, reason `margin`); stop out closes the most losing position at the price where the margin level hits the limit; negative balance protection tops the balance back to 0 (`session.adjust`). Swap at rollover 17:00 New York, Mon–Fri with Wednesday ×3 (crypto daily), points per lot per night (approximate defaults in instruments.ts, editable per session), kept in `trade.swaps` and added to the balance when the trade closes; `netOf` = pnl + swap is what stats use. Floating spread: ×5 in the rollover hour (gold ×4), ×1.5 18:00–02:00 New York, BTC ×1.5 at weekends.
+  FundingPips account types (MT5): commission $5 per lot round turn on forex and gold ($7 Zero), 0.04% of value on crypto; it is fixed per trade at the fill (`trade.comm`) and, like MT5, leaves the balance at the fill (`openCommission`), the rest booked as lots close. Raw default spreads, 1:100 (Zero 1:50), per-symbol caps in `account.levCaps` (gold 1:30 / 1:10 / 1:20, BTC 1:2), 20 lots per order. Margin call / stop out 100/50 is a guess (not published). Risk-based lot sizing counts the commission.
+  `advance` in Workspace.tsx runs all symbols' M1 candles and rollovers in one time-ordered list so margin and stop out see the whole account.
+- `src/lib/instruments.ts` – lot sizes (forex 100k, XAU 100, USOIL 100 barrels, BTC 1), pips (oil 0.01), default spreads, quote→USD via the matching USD pair (`quoteOf`: USOIL is in USD). Oil: triple swap on Friday, Exness cap 1:200, FundingPips 1:10 and no commission (`account.commFree`); both are guesses to check against the user's MT5. Indices (`isIndex`: US30, NAS100): 1 lot = 1 index, a pip = 1 point, 2 digits, in USD, spread 2.5 / 1.5 points (raw 1.5 / 1), triple swap Friday, Exness cap 1:400, FundingPips 1:20 (1-Step 1:5) and no commission; all guesses. `acct()` fills in a prop type's caps and commission-free symbols that older sessions didn't store.
+- `src/lib/chart.ts` – KLineCharts 9.8.12 wrapper: replay, draggable order lines (updated in place by key, so SL/TP can be dragged while the replay plays), trade marks, the drawing list (select, clone, lock, z-order, long/short results up to the cursor), `Wed 15 Oct 25` dates.
+- `src/lib/drawings.ts`, `src/components/DrawingTools.tsx` – drawing tools ported from tradingMind's `static/assets/drawings.js`: tool options, overlays (trend line, rect, Fib, measure, note, long/short, text on lines), floating bar, settings dialog (Style / Text / Coordinates), right-click menu. Templates (`TemplateMenu`, in the floating bar and the settings dialog): Save as…, Apply default, saved list; the starred one (`prefs.templateDefault`) is the tool's default: new drawings start with it (else the last style used) and Apply default applies it (else the built-in style). Last style per tool and templates live in `bm.prefs`.
+- `src/lib/store.ts` – zustand + localStorage (`bm.sessions`, `bm.prefs`). No backend yet.
+- `src/lib/indicators.ts`, `src/components/IndicatorMenu.tsx` – Indicators menu like tradingMind: EMA (up to 5 periods, recalculates only changed candles) and Sydney / Tokyo / London / New York session boxes (M1–H1, times local to each market; overlaps blend, names stack so they never cover each other; prefs v2 migrates the old single "Asia" session).
+- `src/components/Workspace.tsx` – the session screen. One chart or two side by side (`split` pref; chart 2's timeframe is `session.tf2`). The clicked chart is active (`rcRef`): TF buttons, drawing tools and replay steps act on it, and the other follows with `ReplayChart.syncTo` (`Feed.advanceTo`: whole candles plus the forming one rebuilt from M1). Drawings are shared per symbol; each chart passes its own `cx` env to overlays and indicators in extendData. All replay steps and trade changes go through one `enqueue` chain so they never overlap.
+- `src/components/OrderPanel.tsx` – Exness-style order form: Sell/Buy only pick the side, then volume (Lots / Risk % / Risk $), TP and SL (pips or price, "Not set"), Confirm. The draft shows as draggable lines on the chart; the panel can be hidden (`orderPanel` pref, "New order" brings it back). Dragging an open/pending trade's entry, SL or TP on the chart only stages it (`mods` in Workspace.tsx: old level stays grey and keeps working, new line says "Confirm?"); the Confirm / Cancel bar at the bottom of the chart (Enter / Esc) applies it through `modify`. Typed SL/TP in the positions table apply at once.
+- `src/components/Analytics.tsx`, `src/lib/stats.ts` – stats, equity curve, breakdowns (by setup, by checklist ticked or not), CSV.
+- Journal (`src/components/Journal.tsx`, `src/lib/shots.ts`): setups with checklists live in `prefs.setups`; the order panel picks one and ticks rules (`trade.setup`, `trade.checks`). A trade that opens or closes within the last step gets a JPEG of all charts (`ReplayChart.snapshot`, joined side by side) stored in IndexedDB `bm.shots` under `${session}/${trade}/entry|exit`; `trade.shots` flags them. Rewinding clears the flags. Export doesn't include screenshots.
+- Challenge mode (`src/lib/challenge.ts`, `src/components/Challenge.tsx`): `session.challenge` holds the rules (FundingPips 2-Step phases, 1-Step, Zero, FTMO, Custom). Daily loss counts from the balance at 17:00 New York, max loss from the start (Zero: trailing the highest balance, locked at the start). `advance` checks equity on every 1-minute candle; reaching a floor closes everything (reason `breach`) and sets `challenge.failed`; stepping back before it clears it. Passing needs the target, the minimum trading days and nothing open; "Start Phase 2" makes a new session from the cursor.
+- `src/components/Landing.tsx` (`/`) – the landing page: hero with an animated replay chart, features, how it works, markets from `index.json`, a "Dashboard" button. `src/components/Dashboard.tsx` (`/dashboard`) – where the work happens: totals over all sessions (win rate, net P&L, profit factor, average R), "Continue" for the last opened session (`session.usedAt`, set when the workspace opens), session cards with search / filter / sort, Rename (or double-click the name) and Delete, recent trades, New session, Export / Import. `/dashboard?new=1` opens the new session form. The workspace's and analytics' back buttons go to `/dashboard`; the workspace's Session menu also renames and deletes the session (deleting goes to the dashboard first). `brand.tsx` holds the logo.
+
+## Decisions
+
+- Chart types: Candles and Line only (no Heikin Ashi). Chart settings = background + candle/line colours only.
+- KLineCharts stays on 9.8.12 (10.x changed the data API). The patch in `scripts/patch-klinecharts.mjs` lets overlays sit left/right of the loaded candles.
+- Step back (◀ / ←) and Select bar (click a candle to replay from it) rewind the trades to that time (`rewind` in broker.ts): later fills, closes and new trades are undone; moved SL/TP stay. Select bar asks first when trades would change. 1-minute fills are stamped at minute open + 59 s so they sort after user actions at the same replay time.
+- "Jump to" goes to any date with data. Going back first closes open trades at the current price and cancels pending orders (their future is known); trade marks closed after the cursor are hidden.
+
+## Working with the user
+
+- Explain in Banglish (Bengali in English letters).
+- Build whole features, test them in Chrome on http://localhost:3100, then report.
+- The user commits on their own schedule; don't commit unless asked.
+
+## Ideas not built yet
+
+More than two charts, trailing stop / auto breakeven, multiple TPs, hotkeys, drawing undo, auto backup, news calendar markers, session-time boxes, accounts + server storage (Supabase) and payments if it is ever sold.
